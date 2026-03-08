@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   Platform,
   Alert,
   Pressable,
+  Animated,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { GuruAvatar } from '../components/GuruAvatar';
@@ -18,6 +19,7 @@ import { LoadingDots } from '../components/LoadingDots';
 import { colors } from '../theme/colors';
 import { useFinancialStore } from '../store/useFinancialStore';
 import { sendMessageToAdvisor } from '../services/financialAdvisor';
+import { getMemoryMeta } from '../services/memoryService';
 
 const QUICK_PROMPTS = [
   '¿Cómo están mis finanzas?',
@@ -33,10 +35,12 @@ export function HomeScreen() {
     avatarMood,
     profile,
     transactions,
+    memoryVersion,
     addChatMessage,
     updateLastMessage,
     setAdvisorThinking,
     setAvatarMood,
+    bumpMemoryVersion,
     getFinancialSummary,
     loadFromStorage,
     saveToStorage,
@@ -44,7 +48,24 @@ export function HomeScreen() {
 
   const [inputText, setInputText] = useState('');
   const [isTalking, setIsTalking] = useState(false);
+  const [memoryFileCount, setMemoryFileCount] = useState(0);
   const flatListRef = useRef<FlatList>(null);
+  const memoryPulse = useRef(new Animated.Value(1)).current;
+
+  // Reload memory count whenever consolidation runs
+  useEffect(() => {
+    getMemoryMeta().then((m) => setMemoryFileCount(m.fileCount));
+  }, [memoryVersion]);
+
+  // Pulse animation when consolidation finishes (memoryVersion bumps)
+  useEffect(() => {
+    if (memoryVersion > 0) {
+      Animated.sequence([
+        Animated.timing(memoryPulse, { toValue: 1.6, duration: 250, useNativeDriver: true }),
+        Animated.timing(memoryPulse, { toValue: 1, duration: 250, useNativeDriver: true }),
+      ]).start();
+    }
+  }, [memoryVersion, memoryPulse]);
 
   useEffect(() => {
     loadFromStorage();
@@ -118,6 +139,9 @@ export function HomeScreen() {
           setIsTalking(false);
           saveToStorage();
           setTimeout(() => setAvatarMood('neutral'), 3000);
+          // Bump the memory version after a short delay so the consolidation
+          // has time to write its files before we reload the count.
+          setTimeout(() => bumpMemoryVersion(), 4000);
         },
         onError: (error) => {
           updateLastMessage(
@@ -170,9 +194,22 @@ export function HomeScreen() {
               {isAdvisorThinking ? '🤔 Pensando...' : '🟢 Disponible'}
             </Text>
           </View>
-          <TouchableOpacity onPress={handleClearChat} style={styles.clearButton}>
-            <Text style={styles.clearButtonText}>🗑️</Text>
-          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            {/* Memory badge — shows count and pulses on new consolidation */}
+            <Animated.View
+              style={[styles.memoryBadge, { transform: [{ scale: memoryPulse }] }]}
+            >
+              <Text style={styles.memoryBadgeIcon}>🧠</Text>
+              {memoryFileCount > 0 && (
+                <View style={styles.memoryCount}>
+                  <Text style={styles.memoryCountText}>{memoryFileCount}</Text>
+                </View>
+              )}
+            </Animated.View>
+            <TouchableOpacity onPress={handleClearChat} style={styles.clearButton}>
+              <Text style={styles.clearButtonText}>🗑️</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <GuruAvatar mood={avatarMood} isTalking={isTalking} size={140} />
@@ -268,6 +305,35 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textSecondary,
     marginTop: 2,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  memoryBadge: {
+    padding: 6,
+    position: 'relative',
+  },
+  memoryBadgeIcon: {
+    fontSize: 22,
+  },
+  memoryCount: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  memoryCountText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: colors.background,
   },
   clearButton: {
     padding: 8,

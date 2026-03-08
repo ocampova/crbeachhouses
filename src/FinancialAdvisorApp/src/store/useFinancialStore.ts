@@ -58,6 +58,8 @@ interface FinancialState {
   chatHistory: ChatMessage[];
   isAdvisorThinking: boolean;
   avatarMood: 'neutral' | 'happy' | 'thinking' | 'concerned' | 'excited';
+  /** Number of memory consolidations performed (used to refresh memory UI) */
+  memoryVersion: number;
 
   // Actions
   setProfile: (profile: Partial<FinancialProfile>) => void;
@@ -70,6 +72,7 @@ interface FinancialState {
   updateLastMessage: (content: string, isStreaming: boolean) => void;
   setAdvisorThinking: (thinking: boolean) => void;
   setAvatarMood: (mood: FinancialState['avatarMood']) => void;
+  bumpMemoryVersion: () => void;
   getFinancialSummary: () => FinancialSummary;
   loadFromStorage: () => Promise<void>;
   saveToStorage: () => Promise<void>;
@@ -93,6 +96,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
   chatHistory: [],
   isAdvisorThinking: false,
   avatarMood: 'neutral',
+  memoryVersion: 0,
 
   setProfile: (profileUpdate) =>
     set((state) => {
@@ -176,6 +180,7 @@ export const useFinancialStore = create<FinancialState>((set, get) => ({
 
   setAdvisorThinking: (thinking) => set({ isAdvisorThinking: thinking }),
   setAvatarMood: (mood) => set({ avatarMood: mood }),
+  bumpMemoryVersion: () => set((s) => ({ memoryVersion: s.memoryVersion + 1 })),
 
   clearChat: () => set({ chatHistory: [] }),
 

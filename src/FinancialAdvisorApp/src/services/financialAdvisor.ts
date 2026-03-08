@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import * as FileSystem from 'expo-file-system';
 import { FinancialProfile, FinancialSummary, Transaction } from '../store/useFinancialStore';
+import { loadMemoryForContext, consolidateMemory } from './memoryService';
 
 // NOTE: In production, the API key should be stored securely on a backend server.
 // This client-side approach is for development/demo purposes only.
@@ -78,7 +79,9 @@ ${recentTransactions.map(t =>
 }
 
 /**
- * Send a chat message to the financial advisor with streaming
+ * Send a chat message to the financial advisor with streaming.
+ * After the response is complete, triggers a background memory consolidation
+ * so Claude selectively remembers the important parts of the exchange.
  */
 export async function sendMessageToAdvisor(
   userMessage: string,
@@ -90,14 +93,22 @@ export async function sendMessageToAdvisor(
 ): Promise<void> {
   const financialContext = buildFinancialContext(profile, summary, transactions);
 
+  // Load the Guru's persistent selective memory
+  const memoryContext = await loadMemoryForContext();
+
   const systemWithContext = `${SYSTEM_PROMPT}
 
 ---
+## 🧠 TU MEMORIA PERSISTENTE (recuerdos de conversaciones anteriores)
+${memoryContext}
+---
+
 ## CONTEXTO FINANCIERO ACTUAL DEL USUARIO
 ${financialContext}
 ---
 
-Usa este contexto para dar respuestas personalizadas. Si el usuario pregunta sobre sus finanzas, basate siempre en estos datos.`;
+Usa tanto tu memoria como el contexto financiero para dar respuestas personalizadas y coherentes con el historial del usuario.
+Si el usuario hace referencia a algo que discutieron antes, usa tu memoria para responder con continuidad.`;
 
   // Detect mood from user message keywords
   const lowerMsg = userMessage.toLowerCase();
@@ -157,6 +168,17 @@ Usa este contexto para dar respuestas personalizadas. Si el usuario pregunta sob
     }
 
     callbacks.onComplete(fullText);
+
+    // ── Background memory consolidation ──────────────────────────────────────
+    // Fire-and-forget: Claude selectively decides what (if anything) to remember.
+    // We do NOT await this so it never blocks the chat UI.
+    consolidateMemory(
+      client,
+      { userMessage, assistantResponse: fullText },
+      profile.name
+    ).catch((err) =>
+      console.warn('[Memory] Background consolidation failed:', err)
+    );
   } catch (error) {
     callbacks.onError(error instanceof Error ? error : new Error(String(error)));
   }

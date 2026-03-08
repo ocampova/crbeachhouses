@@ -7,12 +7,12 @@ import {
   ScrollView,
   StyleSheet,
   Alert,
-  Switch,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { colors } from '../theme/colors';
 import { useFinancialStore } from '../store/useFinancialStore';
 import { GuruAvatar } from '../components/GuruAvatar';
+import { MemoryPanel } from '../components/MemoryPanel';
 
 const CURRENCIES = ['USD', 'CRC', 'EUR', 'MXN', 'COP', 'BRL'];
 const COUNTRIES = ['Costa Rica', 'México', 'Colombia', 'Argentina', 'España', 'USA', 'Otro'];
@@ -27,9 +27,12 @@ const INVESTMENT_GOALS_OPTIONS = [
   'Emergencias', 'Negocio propio', 'Automóvil',
 ];
 
-export function ProfileScreen() {
-  const { profile, setProfile } = useFinancialStore();
+type ProfileTab = 'profile' | 'memory';
 
+export function ProfileScreen() {
+  const { profile, setProfile, bumpMemoryVersion } = useFinancialStore();
+
+  const [activeTab, setActiveTab] = useState<ProfileTab>('profile');
   const [name, setName] = useState(profile.name);
   const [monthlyIncome, setMonthlyIncome] = useState(String(profile.monthlyIncome));
   const [currency, setCurrency] = useState(profile.currency);
@@ -66,7 +69,33 @@ export function ProfileScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <View style={styles.container}>
+      {/* Tab switcher */}
+      <View style={styles.tabBar}>
+        {(['profile', 'memory'] as ProfileTab[]).map((tab) => (
+          <TouchableOpacity
+            key={tab}
+            style={[styles.tab, activeTab === tab && styles.activeTab]}
+            onPress={() => setActiveTab(tab)}
+          >
+            <Text style={styles.tabIcon}>{tab === 'profile' ? '👤' : '🧠'}</Text>
+            <Text style={[styles.tabLabel, activeTab === tab && styles.activeTabLabel]}>
+              {tab === 'profile' ? 'Mi Perfil' : 'Memoria'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* ── Memory tab ── */}
+      {activeTab === 'memory' && (
+        <View style={styles.memoryContainer}>
+          <MemoryPanel onMemoryChanged={() => bumpMemoryVersion()} />
+        </View>
+      )}
+
+      {/* ── Profile tab ── */}
+      {activeTab === 'profile' && (
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
       {/* Header */}
       <LinearGradient colors={['#0F172A', '#1E293B']} style={styles.header}>
         <GuruAvatar mood={name ? 'happy' : 'neutral'} isTalking={false} size={100} />
@@ -214,12 +243,40 @@ export function ProfileScreen() {
           </Text>
         </View>
       </View>
-    </ScrollView>
+      </ScrollView>
+      )} {/* end profile tab */}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
+  scrollView: { flex: 1 },
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+  },
+  activeTab: {
+    borderBottomWidth: 2,
+    borderBottomColor: colors.primary,
+  },
+  tabIcon: { fontSize: 18 },
+  tabLabel: { fontSize: 14, fontWeight: '600', color: colors.textMuted },
+  activeTabLabel: { color: colors.primary },
+  memoryContainer: {
+    flex: 1,
+    padding: 16,
+  },
   header: {
     alignItems: 'center',
     paddingVertical: 24,
