@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import * as FileSystem from 'expo-file-system';
-import { FinancialProfile, FinancialSummary, Transaction } from '../store/useFinancialStore';
+import { FinancialProfile, FinancialSummary, Transaction, SavingsGoal } from '../store/useFinancialStore';
 import { loadMemoryForContext, consolidateMemory } from './memoryService';
 
 // NOTE: In production, the API key should be stored securely on a backend server.
@@ -450,6 +450,80 @@ Quiero recomendaciones específicas y accionables que pueda implementar esta sem
         event.type === 'content_block_delta' &&
         event.delta.type === 'text_delta'
       ) {
+        callbacks.onToken(event.delta.text);
+      }
+    }
+
+    const finalMessage = await stream.finalMessage();
+    const fullText = finalMessage.content
+      .filter((b) => b.type === 'text')
+      .map((b) => (b as { type: 'text'; text: string }).text)
+      .join('');
+
+    callbacks.onComplete(fullText);
+  } catch (error) {
+    callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
+// ─── Goal Strategy ────────────────────────────────────────────────────────────
+
+export async function getGoalStrategy(
+  goal: SavingsGoal,
+  profile: FinancialProfile,
+  summary: FinancialSummary,
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const now = new Date();
+  const deadline = new Date(goal.deadline);
+  const monthsLeft = Math.max(
+    0.5,
+    (deadline.getFullYear() - now.getFullYear()) * 12 + (deadline.getMonth() - now.getMonth()),
+  );
+  const remaining = goal.targetAmount - goal.currentAmount;
+  const monthlyNeeded = remaining > 0 ? remaining / monthsLeft : 0;
+
+  const context = `
+Meta: ${goal.icon} ${goal.name}
+Objetivo: ${goal.currency} ${goal.targetAmount.toLocaleString('es')}
+Ahorrado: ${goal.currency} ${goal.currentAmount.toLocaleString('es')} (${((goal.currentAmount / goal.targetAmount) * 100).toFixed(0)}%)
+Falta: ${goal.currency} ${remaining.toLocaleString('es')}
+Plazo: ${goal.deadline} (${monthsLeft.toFixed(0)} meses restantes)
+Ahorro mensual necesario: ${goal.currency} ${monthlyNeeded.toLocaleString('es', { maximumFractionDigits: 0 })}
+
+Ingreso mensual: ${goal.currency} ${summary.monthlyIncome.toLocaleString('es')}
+Gastos este mes: ${goal.currency} ${summary.monthlyExpenses.toLocaleString('es')}
+Tasa de ahorro actual: ${summary.savingsRate.toFixed(1)}%
+Perfil de riesgo: ${profile.riskTolerance}
+`.trim();
+
+  try {
+    const stream = client.messages.stream({
+      model: 'claude-opus-4-6',
+      max_tokens: 2000,
+      thinking: { type: 'adaptive' },
+      system: `${SYSTEM_PROMPT}
+
+Eres un experto en planificación de metas de ahorro. Da una estrategia concreta, motivadora y personalizada.`,
+      messages: [
+        {
+          role: 'user',
+          content: `Dame una estrategia detallada para alcanzar esta meta de ahorro:
+
+${context}
+
+Incluye:
+1. ¿Es realista alcanzar la meta en el plazo dado?
+2. Estrategia de ahorro paso a paso
+3. Formas concretas de generar/liberar ${goal.currency} ${monthlyNeeded.toLocaleString('es', { maximumFractionDigits: 0 })} mensuales extra
+4. Opciones de inversión para hacer crecer el dinero ahorrado
+5. Hitos intermedios y cómo celebrarlos`,
+        },
+      ],
+    });
+
+    for await (const event of stream) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         callbacks.onToken(event.delta.text);
       }
     }

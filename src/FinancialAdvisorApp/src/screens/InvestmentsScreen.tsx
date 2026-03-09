@@ -12,10 +12,12 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { colors } from '../theme/colors';
 import { FinancialCard } from '../components/FinancialCard';
-import { useFinancialStore, Investment } from '../store/useFinancialStore';
-import { getInvestmentRecommendations } from '../services/financialAdvisor';
+import { GoalCard } from '../components/GoalCard';
+import { GoalModal } from '../components/GoalModal';
+import { useFinancialStore, Investment, SavingsGoal } from '../store/useFinancialStore';
+import { getInvestmentRecommendations, getGoalStrategy } from '../services/financialAdvisor';
 
-type Tab = 'portfolio' | 'recommendations' | 'add';
+type Tab = 'portfolio' | 'goals' | 'recommendations' | 'add';
 
 const INVESTMENT_TYPES: { key: Investment['type']; label: string; icon: string }[] = [
   { key: 'stocks', label: 'Acciones', icon: '📈' },
@@ -27,13 +29,24 @@ const INVESTMENT_TYPES: { key: Investment['type']; label: string; icon: string }
 ];
 
 export function InvestmentsScreen() {
-  const { investments, addInvestment, removeInvestment, profile, getFinancialSummary } =
-    useFinancialStore();
+  const {
+    investments, addInvestment, removeInvestment,
+    goals, addGoal, updateGoal, removeGoal,
+    profile, getFinancialSummary,
+  } = useFinancialStore();
 
   const [activeTab, setActiveTab] = useState<Tab>('portfolio');
   const [recommendations, setRecommendations] = useState('');
   const [isLoadingRec, setIsLoadingRec] = useState(false);
   const [streamingRec, setStreamingRec] = useState('');
+
+  // Goals state
+  const [goalModalVisible, setGoalModalVisible] = useState(false);
+  const [addFundsGoal, setAddFundsGoal] = useState<SavingsGoal | null>(null);
+  const [goalStrategy, setGoalStrategy] = useState('');
+  const [strategyGoal, setStrategyGoal] = useState<SavingsGoal | null>(null);
+  const [isLoadingStrategy, setIsLoadingStrategy] = useState(false);
+  const [streamingStrategy, setStreamingStrategy] = useState('');
 
   const [name, setName] = useState('');
   const [type, setType] = useState<Investment['type']>('stocks');
@@ -43,6 +56,41 @@ export function InvestmentsScreen() {
   const [notes, setNotes] = useState('');
 
   const summary = getFinancialSummary();
+
+  const handleAskGuruGoal = async (goal: SavingsGoal) => {
+    setStrategyGoal(goal);
+    setGoalStrategy('');
+    setStreamingStrategy('');
+    setIsLoadingStrategy(true);
+    setActiveTab('recommendations');
+
+    await getGoalStrategy(goal, profile, summary, {
+      onToken: (token) => setStreamingStrategy((prev) => prev + token),
+      onComplete: (fullText) => {
+        setGoalStrategy(fullText);
+        setStreamingStrategy('');
+        setIsLoadingStrategy(false);
+      },
+      onError: (err) => {
+        setIsLoadingStrategy(false);
+        Alert.alert('Error', err.message);
+      },
+    });
+  };
+
+  const handleAddFunds = (id: string, amount: number) => {
+    const goal = goals.find((g) => g.id === id);
+    if (!goal) return;
+    setAddFundsGoal(goal);
+    setGoalModalVisible(true);
+  };
+
+  const handleConfirmAddFunds = (id: string, amount: number) => {
+    const goal = goals.find((g) => g.id === id);
+    if (!goal) return;
+    updateGoal(id, { currentAmount: goal.currentAmount + amount });
+    setAddFundsGoal(null);
+  };
 
   // Calculate portfolio metrics
   const totalCurrentValue = investments.reduce((sum, i) => sum + i.currentValue, 0);
@@ -112,22 +160,43 @@ export function InvestmentsScreen() {
   const formatCurrency = (amount: number) =>
     `${profile.currency} ${amount.toLocaleString('es', { minimumFractionDigits: 0 })}`;
 
+  const TAB_LABELS: Record<Tab, string> = {
+    portfolio: '💼 Portafolio',
+    goals: '🎯 Metas',
+    recommendations: '🧠 Consejos',
+    add: '➕ Agregar',
+  };
+
   return (
     <View style={styles.container}>
       {/* Tab Navigation */}
-      <View style={styles.tabBar}>
-        {(['portfolio', 'recommendations', 'add'] as Tab[]).map((tab) => (
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.tabBar}
+        contentContainerStyle={styles.tabBarContent}
+      >
+        {(['portfolio', 'goals', 'recommendations', 'add'] as Tab[]).map((tab) => (
           <TouchableOpacity
             key={tab}
             style={[styles.tab, activeTab === tab && styles.activeTab]}
             onPress={() => setActiveTab(tab)}
           >
             <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
-              {tab === 'portfolio' ? '💼 Portafolio' : tab === 'recommendations' ? '🧠 Consejos' : '➕ Agregar'}
+              {TAB_LABELS[tab]}
             </Text>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
+
+      <GoalModal
+        visible={goalModalVisible}
+        onClose={() => { setGoalModalVisible(false); setAddFundsGoal(null); }}
+        onSave={(goal) => { addGoal(goal); setGoalModalVisible(false); }}
+        currency={profile.currency}
+        addFundsToGoal={addFundsGoal}
+        onAddFunds={handleConfirmAddFunds}
+      />
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         {/* PORTFOLIO TAB */}
@@ -256,40 +325,128 @@ export function InvestmentsScreen() {
           </View>
         )}
 
-        {/* RECOMMENDATIONS TAB */}
-        {activeTab === 'recommendations' && (
+        {/* GOALS TAB */}
+        {activeTab === 'goals' && (
           <View style={styles.section}>
-            <View style={styles.recommendHeader}>
-              <Text style={styles.sectionTitle}>🧠 Consejos de Inversión Personalizados</Text>
-              <TouchableOpacity onPress={handleGetRecommendations} disabled={isLoadingRec}>
-                <Text style={styles.refreshBtn}>{isLoadingRec ? '⏳' : '🔄'}</Text>
-              </TouchableOpacity>
-            </View>
+            {/* Total savings summary */}
+            {goals.length > 0 && (
+              <FinancialCard
+                title="Total en Metas de Ahorro"
+                value={`${profile.currency} ${goals.reduce((s, g) => s + g.currentAmount, 0).toLocaleString('es', { maximumFractionDigits: 0 })}`}
+                subtitle={`Objetivo total: ${profile.currency} ${goals.reduce((s, g) => s + g.targetAmount, 0).toLocaleString('es', { maximumFractionDigits: 0 })}`}
+                icon="🎯"
+                gradientColors={['#4C1D95', '#6D28D9']}
+              />
+            )}
 
-            {isLoadingRec ? (
-              <View style={styles.loadingSection}>
-                <ActivityIndicator size="large" color={colors.primary} />
-                <Text style={styles.loadingText}>El Gurú está analizando tu situación...</Text>
-                {streamingRec ? (
-                  <View style={styles.streamingBox}>
-                    <Text style={styles.streamingText}>{streamingRec}▌</Text>
-                  </View>
-                ) : null}
-              </View>
-            ) : recommendations ? (
-              <View style={styles.recommendationsBox}>
-                <Text style={styles.recommendationsText}>{recommendations}</Text>
-              </View>
-            ) : (
+            {goals.length === 0 ? (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyIcon}>🎯</Text>
                 <Text style={styles.emptyText}>
-                  Pulsa el botón de recomendaciones para que el Gurú analice tu perfil y sugiera las mejores inversiones para ti
+                  Aún no tienes metas de ahorro. ¡Crea tu primera meta y el Gurú te ayudará a alcanzarla!
                 </Text>
-                <TouchableOpacity style={styles.emptyButton} onPress={handleGetRecommendations}>
-                  <Text style={styles.emptyButtonText}>Obtener Recomendaciones</Text>
+                <TouchableOpacity
+                  style={styles.emptyButton}
+                  onPress={() => setGoalModalVisible(true)}
+                >
+                  <Text style={styles.emptyButtonText}>Crear Primera Meta</Text>
                 </TouchableOpacity>
               </View>
+            ) : (
+              <>
+                {goals.map((goal) => (
+                  <GoalCard
+                    key={goal.id}
+                    goal={goal}
+                    onDelete={removeGoal}
+                    onAskGuru={handleAskGuruGoal}
+                    onAddFunds={handleAddFunds}
+                  />
+                ))}
+                <TouchableOpacity
+                  style={styles.addGoalButton}
+                  onPress={() => setGoalModalVisible(true)}
+                >
+                  <Text style={styles.addGoalButtonText}>➕ Agregar Nueva Meta</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        )}
+
+        {/* RECOMMENDATIONS TAB */}
+        {activeTab === 'recommendations' && (
+          <View style={styles.section}>
+            {/* Goal strategy header when coming from a goal */}
+            {strategyGoal ? (
+              <>
+                <View style={styles.recommendHeader}>
+                  <Text style={styles.sectionTitle}>
+                    {strategyGoal.icon} Estrategia: {strategyGoal.name}
+                  </Text>
+                  <TouchableOpacity onPress={() => { setStrategyGoal(null); setGoalStrategy(''); }}>
+                    <Text style={styles.refreshBtn}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+                {isLoadingStrategy ? (
+                  <View style={styles.loadingSection}>
+                    <ActivityIndicator size="large" color={colors.primary} />
+                    <Text style={styles.loadingText}>El Gurú está diseñando tu estrategia...</Text>
+                    {streamingStrategy ? (
+                      <View style={styles.streamingBox}>
+                        <Text style={styles.streamingText}>{streamingStrategy}▌</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : goalStrategy ? (
+                  <View style={styles.recommendationsBox}>
+                    <Text style={styles.recommendationsText}>{goalStrategy}</Text>
+                  </View>
+                ) : null}
+                <TouchableOpacity
+                  style={[styles.recommendButton, { marginTop: 8 }]}
+                  onPress={handleGetRecommendations}
+                >
+                  <LinearGradient colors={colors.gradientPurple} style={styles.recommendGradient}>
+                    <Text style={styles.recommendText}>🧠 Ver Consejos de Inversión</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <View style={styles.recommendHeader}>
+                  <Text style={styles.sectionTitle}>🧠 Consejos de Inversión Personalizados</Text>
+                  <TouchableOpacity onPress={handleGetRecommendations} disabled={isLoadingRec}>
+                    <Text style={styles.refreshBtn}>{isLoadingRec ? '⏳' : '🔄'}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {isLoadingRec ? (
+                  <View style={styles.loadingSection}>
+                    <ActivityIndicator size="large" color={colors.primary} />
+                    <Text style={styles.loadingText}>El Gurú está analizando tu situación...</Text>
+                    {streamingRec ? (
+                      <View style={styles.streamingBox}>
+                        <Text style={styles.streamingText}>{streamingRec}▌</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : recommendations ? (
+                  <View style={styles.recommendationsBox}>
+                    <Text style={styles.recommendationsText}>{recommendations}</Text>
+                  </View>
+                ) : (
+                  <View style={styles.emptyState}>
+                    <Text style={styles.emptyIcon}>🎯</Text>
+                    <Text style={styles.emptyText}>
+                      Pulsa el botón de recomendaciones para que el Gurú analice tu perfil y sugiera las mejores inversiones para ti
+                    </Text>
+                    <TouchableOpacity style={styles.emptyButton} onPress={handleGetRecommendations}>
+                      <Text style={styles.emptyButtonText}>Obtener Recomendaciones</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </>
             )}
           </View>
         )}
@@ -371,15 +528,19 @@ export function InvestmentsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   tabBar: {
-    flexDirection: 'row',
     backgroundColor: colors.surface,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
+    maxHeight: 48,
+  },
+  tabBarContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   tab: {
-    flex: 1,
     alignItems: 'center',
     paddingVertical: 12,
+    paddingHorizontal: 16,
   },
   activeTab: {
     borderBottomWidth: 2,
@@ -387,6 +548,16 @@ const styles = StyleSheet.create({
   },
   tabText: { fontSize: 13, color: colors.textMuted, fontWeight: '600' },
   activeTabText: { color: colors.primary },
+  addGoalButton: {
+    backgroundColor: colors.surfaceLight,
+    borderRadius: 12,
+    padding: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderStyle: 'dashed',
+  },
+  addGoalButtonText: { fontSize: 14, color: colors.textSecondary, fontWeight: '600' },
   content: { flex: 1 },
   section: { padding: 16, gap: 12 },
   sectionTitle: {

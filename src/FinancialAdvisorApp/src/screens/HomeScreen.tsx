@@ -11,11 +11,14 @@ import {
   Alert,
   Pressable,
   Animated,
+  ScrollView,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { GuruAvatar } from '../components/GuruAvatar';
 import { ChatBubble } from '../components/ChatBubble';
 import { LoadingDots } from '../components/LoadingDots';
+import { HealthScoreBadge } from '../components/HealthScoreBadge';
+import { InsightCard } from '../components/InsightCard';
 import { colors } from '../theme/colors';
 import { useFinancialStore } from '../store/useFinancialStore';
 import { sendMessageToAdvisor } from '../services/financialAdvisor';
@@ -36,12 +39,15 @@ export function HomeScreen() {
     profile,
     transactions,
     memoryVersion,
+    pendingInsights,
     addChatMessage,
     updateLastMessage,
     setAdvisorThinking,
     setAvatarMood,
     bumpMemoryVersion,
+    dismissInsight,
     getFinancialSummary,
+    getHealthScore,
     loadFromStorage,
     saveToStorage,
   } = useFinancialStore();
@@ -73,7 +79,6 @@ export function HomeScreen() {
 
   useEffect(() => {
     if (chatHistory.length === 0 && profile.name) {
-      // Welcome message
       addChatMessage({
         role: 'assistant',
         content: `¡Hola, ${profile.name}! 👋 Soy tu **Gurú Financiero Personal**. Estoy aquí para ayudarte a tomar las mejores decisiones con tu dinero.\n\n¿En qué puedo ayudarte hoy?`,
@@ -88,23 +93,21 @@ export function HomeScreen() {
     }
   }, [profile.name]);
 
-  const handleSend = async () => {
-    const text = inputText.trim();
-    if (!text || isAdvisorThinking) return;
+  const handleSend = async (text?: string) => {
+    const messageText = (text ?? inputText).trim();
+    if (!messageText || isAdvisorThinking) return;
 
     setInputText('');
 
-    // Add user message
     addChatMessage({
       role: 'user',
-      content: text,
+      content: messageText,
       timestamp: new Date().toISOString(),
     });
 
     setAdvisorThinking(true);
     setIsTalking(false);
 
-    // Add empty assistant message for streaming
     addChatMessage({
       role: 'assistant',
       content: '',
@@ -121,7 +124,7 @@ export function HomeScreen() {
     let streamedText = '';
 
     await sendMessageToAdvisor(
-      text,
+      messageText,
       history,
       profile,
       summary,
@@ -139,8 +142,6 @@ export function HomeScreen() {
           setIsTalking(false);
           saveToStorage();
           setTimeout(() => setAvatarMood('neutral'), 3000);
-          // Bump the memory version after a short delay so the consolidation
-          // has time to write its files before we reload the count.
           setTimeout(() => bumpMemoryVersion(), 4000);
         },
         onError: (error) => {
@@ -157,8 +158,19 @@ export function HomeScreen() {
     );
   };
 
-  const handleQuickPrompt = (prompt: string) => {
-    setInputText(prompt);
+  const handleInsightTap = (insight: ReturnType<typeof useFinancialStore.getState>['pendingInsights'][0]) => {
+    dismissInsight(insight.id);
+    handleSend(`💡 ${insight.title}: ${insight.body}`);
+  };
+
+  const handleAskAboutScore = () => {
+    const hs = getHealthScore();
+    handleSend(
+      `¿Por qué mi puntaje de salud financiera es ${hs.score}/100 (${hs.label})? ` +
+      `Desglose: ahorro ${hs.breakdown.savings}/30, presupuestos ${hs.breakdown.budgets}/25, ` +
+      `inversiones ${hs.breakdown.investments}/20, fondo emergencia ${hs.breakdown.emergency}/15, ` +
+      `perfil ${hs.breakdown.profile}/10. ¿Cómo puedo mejorarlo?`
+    );
   };
 
   const handleClearChat = () => {
@@ -175,6 +187,8 @@ export function HomeScreen() {
       ]
     );
   };
+
+  const healthScore = getHealthScore();
 
   return (
     <KeyboardAvoidingView
@@ -195,7 +209,13 @@ export function HomeScreen() {
             </Text>
           </View>
           <View style={styles.headerActions}>
-            {/* Memory badge — shows count and pulses on new consolidation */}
+            {/* Health Score Badge */}
+            <HealthScoreBadge
+              healthScore={healthScore}
+              size={64}
+              onPress={handleAskAboutScore}
+            />
+            {/* Memory badge */}
             <Animated.View
               style={[styles.memoryBadge, { transform: [{ scale: memoryPulse }] }]}
             >
@@ -212,7 +232,28 @@ export function HomeScreen() {
           </View>
         </View>
 
-        <GuruAvatar mood={avatarMood} isTalking={isTalking} size={140} />
+        <GuruAvatar mood={avatarMood} isTalking={isTalking} size={130} />
+
+        {/* Proactive Insight Cards */}
+        {pendingInsights.length > 0 && (
+          <View style={styles.insightsSection}>
+            <Text style={styles.insightsLabel}>💡 El Gurú tiene algo para decirte</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.insightsList}
+            >
+              {pendingInsights.slice(0, 5).map((insight) => (
+                <InsightCard
+                  key={insight.id}
+                  insight={insight}
+                  onDismiss={dismissInsight}
+                  onTap={handleInsightTap}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        )}
 
         {/* Quick prompts */}
         <View style={styles.quickPrompts}>
@@ -220,7 +261,7 @@ export function HomeScreen() {
             <Pressable
               key={prompt}
               style={({ pressed }) => [styles.quickPrompt, pressed && styles.quickPromptPressed]}
-              onPress={() => handleQuickPrompt(prompt)}
+              onPress={() => setInputText(prompt)}
             >
               <Text style={styles.quickPromptText}>{prompt}</Text>
             </Pressable>
@@ -255,11 +296,11 @@ export function HomeScreen() {
           placeholderTextColor={colors.textMuted}
           multiline
           maxLength={500}
-          onSubmitEditing={handleSend}
+          onSubmitEditing={() => handleSend()}
         />
         <TouchableOpacity
           style={[styles.sendButton, (!inputText.trim() || isAdvisorThinking) && styles.sendButtonDisabled]}
-          onPress={handleSend}
+          onPress={() => handleSend()}
           disabled={!inputText.trim() || isAdvisorThinking}
         >
           <LinearGradient
@@ -340,6 +381,23 @@ const styles = StyleSheet.create({
   },
   clearButtonText: {
     fontSize: 20,
+  },
+  insightsSection: {
+    width: '100%',
+    paddingHorizontal: 12,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  insightsLabel: {
+    fontSize: 11,
+    color: colors.textMuted,
+    fontWeight: '600',
+    marginBottom: 6,
+    paddingLeft: 2,
+  },
+  insightsList: {
+    gap: 8,
+    paddingRight: 12,
   },
   quickPrompts: {
     flexDirection: 'row',

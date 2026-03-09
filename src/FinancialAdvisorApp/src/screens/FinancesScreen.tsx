@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -14,8 +14,11 @@ import * as DocumentPicker from 'expo-document-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { colors } from '../theme/colors';
 import { FinancialCard } from '../components/FinancialCard';
-import { useFinancialStore, Transaction } from '../store/useFinancialStore';
+import { BudgetGauge } from '../components/BudgetGauge';
+import { BudgetModal } from '../components/BudgetModal';
+import { useFinancialStore, Transaction, Budget } from '../store/useFinancialStore';
 import { analyzePDFDocument, analyzeEmailContent } from '../services/financialAdvisor';
+import { generateProactiveInsights } from '../services/insightsService';
 import {
   authenticateWithGmail,
   fetchFinancialEmails,
@@ -23,8 +26,9 @@ import {
   signOutFromGmail,
   EmailMessage,
 } from '../services/gmailService';
+import { detectRecurring } from '../utils/recurringDetector';
 
-type Tab = 'overview' | 'add' | 'pdf' | 'email';
+type Tab = 'overview' | 'budgets' | 'add' | 'subs' | 'pdf' | 'email';
 
 const EXPENSE_CATEGORIES = [
   'Alimentación', 'Transporte', 'Vivienda', 'Servicios', 'Salud',
@@ -34,6 +38,13 @@ const INCOME_CATEGORIES = [
   'Salario', 'Freelance', 'Inversiones', 'Alquiler', 'Negocio', 'Otros',
 ];
 
+const FREQ_LABEL: Record<string, string> = {
+  weekly: 'Semanal',
+  monthly: 'Mensual',
+  yearly: 'Anual',
+  irregular: 'Irregular',
+};
+
 export function FinancesScreen() {
   const {
     transactions,
@@ -42,6 +53,12 @@ export function FinancesScreen() {
     addTransactions,
     removeTransaction,
     profile,
+    budgets,
+    addBudget,
+    updateBudget,
+    removeBudget,
+    getBudgetStatus,
+    addInsights,
   } = useFinancialStore();
 
   const [activeTab, setActiveTab] = useState<Tab>('overview');
@@ -62,7 +79,25 @@ export function FinancesScreen() {
   const [emailContent, setEmailContent] = useState('');
   const [selectedEmail, setSelectedEmail] = useState<EmailMessage | null>(null);
 
+  const [budgetModalVisible, setBudgetModalVisible] = useState(false);
+  const [editingBudget, setEditingBudget] = useState<Budget | null>(null);
+
   const summary = getFinancialSummary();
+  const budgetStatuses = getBudgetStatus();
+  const recurringItems = useMemo(() => detectRecurring(transactions), [transactions]);
+
+  // Fire-and-forget insight generation after new transactions arrive
+  const triggerInsights = (updatedTransactions: Transaction[]) => {
+    const currentSummary = getFinancialSummary();
+    const currentBudgetStatuses = getBudgetStatus();
+    generateProactiveInsights(profile, currentSummary, updatedTransactions, currentBudgetStatuses)
+      .then((insights) => {
+        if (insights.length > 0) addInsights(insights);
+      })
+      .catch(() => { /* silent — insights are optional */ });
+  };
+
+  const totalMonthlySubs = recurringItems.reduce((s, r) => s + r.monthlyCost, 0);
 
   const handleAddTransaction = () => {
     if (!amount || !description || !category) {
@@ -87,6 +122,11 @@ export function FinancesScreen() {
     setDescription('');
     setCategory('');
     Alert.alert('✅ Listo', 'Transacción agregada exitosamente');
+    // Trigger proactive insights in the background
+    triggerInsights([...transactions, {
+      id: '', type: transactionType, category, description,
+      amount: numAmount, currency: profile.currency, date, source: 'manual',
+    }]);
   };
 
   const handlePickPDF = async () => {
@@ -107,7 +147,7 @@ export function FinancesScreen() {
         onToken: (token) => {
           setProcessingText((prev) => prev + token);
         },
-        onComplete: (fullText) => {
+        onComplete: () => {
           setIsProcessing(false);
         },
         onError: (err) => {
@@ -123,7 +163,7 @@ export function FinancesScreen() {
       }).catch(() => {
         setIsProcessing(false);
       });
-    } catch (error) {
+    } catch {
       setIsProcessing(false);
       Alert.alert('Error', 'No se pudo abrir el documento');
     }
@@ -132,8 +172,11 @@ export function FinancesScreen() {
   const handleConfirmImport = () => {
     addTransactions(pendingTransactions);
     setAnalysisModal(false);
+    const imported = [...pendingTransactions];
     setPendingTransactions([]);
-    Alert.alert('✅ Importado', `Se importaron ${pendingTransactions.length} transacciones del PDF`);
+    Alert.alert('✅ Importado', `Se importaron ${imported.length} transacciones del PDF`);
+    // Trigger proactive insights in the background
+    triggerInsights([...transactions, ...imported.map((t) => ({ ...t, id: '' }))]);
   };
 
   const handleGmailAuth = async () => {
@@ -151,7 +194,7 @@ export function FinancesScreen() {
     try {
       const fetchedEmails = await fetchFinancialEmails(15);
       setEmails(fetchedEmails);
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'No se pudieron obtener los correos');
     } finally {
       setIsProcessing(false);
@@ -210,27 +253,38 @@ export function FinancesScreen() {
   const formatCurrency = (amount: number) =>
     `${profile.currency} ${amount.toLocaleString('es', { minimumFractionDigits: 2 })}`;
 
+  const TAB_CONFIG: { key: Tab; icon: string; label: string }[] = [
+    { key: 'overview', icon: '📊', label: 'Resumen' },
+    { key: 'budgets', icon: '🎯', label: 'Presupuesto' },
+    { key: 'add', icon: '➕', label: 'Agregar' },
+    { key: 'subs', icon: '🔄', label: 'Recurrentes' },
+    { key: 'pdf', icon: '📄', label: 'PDF' },
+    { key: 'email', icon: '📧', label: 'Correos' },
+  ];
+
   return (
     <View style={styles.container}>
       {/* Tab Navigation */}
-      <View style={styles.tabBar}>
-        {(['overview', 'add', 'pdf', 'email'] as Tab[]).map((tab) => (
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.tabBarScroll}
+        contentContainerStyle={styles.tabBar}
+      >
+        {TAB_CONFIG.map(({ key, icon, label }) => (
           <TouchableOpacity
-            key={tab}
-            style={[styles.tab, activeTab === tab && styles.activeTab]}
-            onPress={() => setActiveTab(tab)}
+            key={key}
+            style={[styles.tab, activeTab === key && styles.activeTab]}
+            onPress={() => setActiveTab(key)}
           >
-            <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
-              {tab === 'overview' ? '📊' : tab === 'add' ? '➕' : tab === 'pdf' ? '📄' : '📧'}
-            </Text>
-            <Text style={[styles.tabLabel, activeTab === tab && styles.activeTabText]}>
-              {tab === 'overview' ? 'Resumen' : tab === 'add' ? 'Agregar' : tab === 'pdf' ? 'PDF' : 'Correos'}
-            </Text>
+            <Text style={[styles.tabText, activeTab === key && styles.activeTabText]}>{icon}</Text>
+            <Text style={[styles.tabLabel, activeTab === key && styles.activeTabLabel]}>{label}</Text>
           </TouchableOpacity>
         ))}
-      </View>
+      </ScrollView>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+
         {/* OVERVIEW TAB */}
         {activeTab === 'overview' && (
           <View style={styles.section}>
@@ -317,12 +371,89 @@ export function FinancesScreen() {
           </View>
         )}
 
+        {/* BUDGETS TAB */}
+        {activeTab === 'budgets' && (
+          <View style={styles.section}>
+            <View style={styles.budgetHeader}>
+              <View>
+                <Text style={styles.sectionTitle}>🎯 Presupuestos Mensuales</Text>
+                <Text style={styles.sectionSubtitle}>
+                  Controla tus gastos por categoría este mes
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.addBudgetBtn}
+                onPress={() => { setEditingBudget(null); setBudgetModalVisible(true); }}
+              >
+                <LinearGradient colors={colors.gradientPrimary} style={styles.addBudgetGradient}>
+                  <Text style={styles.addBudgetText}>+ Nuevo</Text>
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+
+            {budgetStatuses.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyIcon}>🎯</Text>
+                <Text style={styles.emptyText}>
+                  Aún no tienes presupuestos configurados.{'\n'}
+                  Establece límites mensuales por categoría para controlar mejor tus gastos.
+                </Text>
+                <TouchableOpacity
+                  style={styles.emptyButton}
+                  onPress={() => { setEditingBudget(null); setBudgetModalVisible(true); }}
+                >
+                  <Text style={styles.emptyButtonText}>Crear mi primer presupuesto</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <>
+                {/* Summary row */}
+                <View style={styles.budgetSummary}>
+                  <View style={styles.budgetStat}>
+                    <Text style={styles.budgetStatValue}>
+                      {budgetStatuses.filter((s) => s.status === 'safe').length}
+                    </Text>
+                    <Text style={[styles.budgetStatLabel, { color: '#10B981' }]}>✅ OK</Text>
+                  </View>
+                  <View style={styles.budgetStat}>
+                    <Text style={styles.budgetStatValue}>
+                      {budgetStatuses.filter((s) => s.status === 'warning').length}
+                    </Text>
+                    <Text style={[styles.budgetStatLabel, { color: '#F59E0B' }]}>⚡ Cerca</Text>
+                  </View>
+                  <View style={styles.budgetStat}>
+                    <Text style={styles.budgetStatValue}>
+                      {budgetStatuses.filter((s) => s.status === 'over').length}
+                    </Text>
+                    <Text style={[styles.budgetStatLabel, { color: '#EF4444' }]}>⚠️ Excedido</Text>
+                  </View>
+                </View>
+
+                {budgetStatuses.map((status) => (
+                  <BudgetGauge
+                    key={status.budget.id}
+                    status={status}
+                    currency={profile.currency}
+                    onDelete={removeBudget}
+                  />
+                ))}
+
+                <TouchableOpacity
+                  style={styles.addMoreBudgetBtn}
+                  onPress={() => { setEditingBudget(null); setBudgetModalVisible(true); }}
+                >
+                  <Text style={styles.addMoreText}>+ Agregar otro presupuesto</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        )}
+
         {/* ADD TRANSACTION TAB */}
         {activeTab === 'add' && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Nueva Transacción</Text>
 
-            {/* Type selector */}
             <View style={styles.typeSelector}>
               {(['income', 'expense'] as const).map((type) => (
                 <TouchableOpacity
@@ -360,7 +491,6 @@ export function FinancesScreen() {
               onChangeText={setDate}
             />
 
-            {/* Categories */}
             <Text style={styles.fieldLabel}>Categoría</Text>
             <View style={styles.categoriesGrid}>
               {(transactionType === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map((cat) => (
@@ -381,6 +511,70 @@ export function FinancesScreen() {
                 <Text style={styles.primaryButtonText}>Agregar Transacción</Text>
               </LinearGradient>
             </TouchableOpacity>
+          </View>
+        )}
+
+        {/* RECURRING / SUBSCRIPTIONS TAB */}
+        {activeTab === 'subs' && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>🔄 Gastos Recurrentes</Text>
+            <Text style={styles.description}>
+              Detectados automáticamente de tus transacciones. Revisa tus suscripciones y cobros periódicos.
+            </Text>
+
+            {recurringItems.length > 0 && (
+              <View style={styles.totalSubsCard}>
+                <Text style={styles.totalSubsLabel}>Costo mensual total estimado</Text>
+                <Text style={styles.totalSubsValue}>
+                  {profile.currency} {totalMonthlySubs.toLocaleString('es', { maximumFractionDigits: 0 })}
+                </Text>
+                <Text style={styles.totalSubsYearly}>
+                  ≈ {profile.currency} {(totalMonthlySubs * 12).toLocaleString('es', { maximumFractionDigits: 0 })} al año
+                </Text>
+              </View>
+            )}
+
+            {recurringItems.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyIcon}>🔍</Text>
+                <Text style={styles.emptyText}>
+                  No se detectaron gastos recurrentes aún.{'\n'}
+                  Agrega más transacciones para que el análisis funcione mejor.
+                </Text>
+              </View>
+            ) : (
+              recurringItems.map((item, idx) => (
+                <View key={idx} style={styles.subCard}>
+                  <View style={styles.subHeader}>
+                    <Text style={styles.subDescription} numberOfLines={1}>
+                      {item.description}
+                    </Text>
+                    <View style={styles.freqBadge}>
+                      <Text style={styles.freqBadgeText}>{FREQ_LABEL[item.frequency]}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.subDetails}>
+                    <View>
+                      <Text style={styles.subCategory}>{item.category}</Text>
+                      <Text style={styles.subOccurrences}>
+                        {item.occurrences} veces detectado
+                      </Text>
+                    </View>
+                    <View style={styles.subAmounts}>
+                      <Text style={styles.subAmount}>
+                        {profile.currency} {item.amount.toLocaleString('es', { maximumFractionDigits: 0 })} / vez
+                      </Text>
+                      <Text style={styles.subMonthly}>
+                        ≈ {profile.currency} {item.monthlyCost.toLocaleString('es', { maximumFractionDigits: 0 })} / mes
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.subNext}>
+                    Próximo esperado: {item.nextExpectedDate}
+                  </Text>
+                </View>
+              ))
+            )}
           </View>
         )}
 
@@ -425,7 +619,6 @@ export function FinancesScreen() {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>📧 Analizar Correos</Text>
 
-            {/* Gmail connect button */}
             <View style={styles.gmailSection}>
               <Text style={styles.fieldLabel}>Opción 1: Conectar Gmail</Text>
               <TouchableOpacity
@@ -461,7 +654,6 @@ export function FinancesScreen() {
 
             <View style={styles.divider} />
 
-            {/* Manual email paste */}
             <Text style={styles.fieldLabel}>Opción 2: Pegar contenido de correo</Text>
             <TextInput
               style={[styles.input, styles.textArea]}
@@ -500,6 +692,21 @@ export function FinancesScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* Budget Modal */}
+      <BudgetModal
+        visible={budgetModalVisible}
+        onClose={() => setBudgetModalVisible(false)}
+        onSave={(budget) => {
+          if (editingBudget) {
+            updateBudget(editingBudget.id, budget);
+          } else {
+            addBudget(budget);
+          }
+        }}
+        currency={profile.currency}
+        existingBudget={editingBudget}
+      />
 
       {/* Import confirmation modal */}
       <Modal visible={analysisModal} transparent animationType="slide">
@@ -546,24 +753,29 @@ export function FinancesScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  tabBar: {
-    flexDirection: 'row',
+  tabBarScroll: {
     backgroundColor: colors.surface,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
+    maxHeight: 56,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 4,
   },
   tab: {
-    flex: 1,
     alignItems: 'center',
-    paddingVertical: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
     gap: 2,
   },
   activeTab: {
     borderBottomWidth: 2,
     borderBottomColor: colors.primary,
   },
-  tabText: { fontSize: 18 },
+  tabText: { fontSize: 16 },
   tabLabel: { fontSize: 10, color: colors.textMuted },
+  activeTabLabel: { color: colors.primary, fontWeight: '600' },
   activeTabText: { color: colors.primary },
   content: { flex: 1 },
   section: { padding: 16, gap: 12 },
@@ -573,6 +785,7 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     marginBottom: 4,
   },
+  sectionSubtitle: { fontSize: 12, color: colors.textSecondary },
   description: { fontSize: 14, color: colors.textSecondary, lineHeight: 20 },
   cardsGrid: { flexDirection: 'row', gap: 10 },
   gridCard: { flex: 1 },
@@ -611,6 +824,87 @@ const styles = StyleSheet.create({
   transactionRight: { alignItems: 'flex-end', gap: 4 },
   transactionAmount: { fontSize: 14, fontWeight: '700' },
   deleteBtn: { fontSize: 12, color: colors.textMuted, padding: 2 },
+
+  // Budget styles
+  budgetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  addBudgetBtn: { borderRadius: 10, overflow: 'hidden' },
+  addBudgetGradient: { paddingHorizontal: 14, paddingVertical: 8 },
+  addBudgetText: { color: '#FFF', fontWeight: '700', fontSize: 13 },
+  budgetSummary: {
+    flexDirection: 'row',
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  budgetStat: { flex: 1, alignItems: 'center' },
+  budgetStatValue: { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
+  budgetStatLabel: { fontSize: 11, fontWeight: '600', marginTop: 2 },
+  addMoreBudgetBtn: {
+    alignItems: 'center',
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    borderStyle: 'dashed',
+  },
+  addMoreText: { fontSize: 14, color: colors.textSecondary },
+
+  // Subscriptions styles
+  totalSubsCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.primary + '40',
+  },
+  totalSubsLabel: { fontSize: 12, color: colors.textSecondary },
+  totalSubsValue: { fontSize: 26, fontWeight: '800', color: colors.primary, marginTop: 4 },
+  totalSubsYearly: { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  subCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 14,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  subHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  subDescription: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, flex: 1 },
+  freqBadge: {
+    backgroundColor: colors.primary + '20',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  freqBadgeText: { fontSize: 11, color: colors.primary, fontWeight: '600' },
+  subDetails: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
+  subCategory: { fontSize: 12, color: colors.textSecondary },
+  subOccurrences: { fontSize: 11, color: colors.textMuted },
+  subAmounts: { alignItems: 'flex-end' },
+  subAmount: { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
+  subMonthly: { fontSize: 11, color: colors.textMuted },
+  subNext: { fontSize: 11, color: colors.textMuted },
+
+  // Empty state
+  emptyState: { alignItems: 'center', paddingVertical: 32, gap: 12 },
+  emptyIcon: { fontSize: 44 },
+  emptyText: { fontSize: 14, color: colors.textSecondary, textAlign: 'center', lineHeight: 20 },
+  emptyButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+  },
+  emptyButtonText: { color: colors.background, fontWeight: '700', fontSize: 14 },
+
+  // Form styles
   typeSelector: { flexDirection: 'row', gap: 10 },
   typeButton: {
     flex: 1,
